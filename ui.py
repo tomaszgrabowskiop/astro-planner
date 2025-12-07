@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 import pytz
 import re
 import astropy.units as u
@@ -43,79 +43,64 @@ def setup_sidebar():
         fov_h = (2 * np.arctan((sh / (2 * fl)))) * (180 / np.pi)
         st.info(f"FOV: {fov_w:.1f}° x {fov_h:.1f}°")
 
-        st.header("3. Filtracja i Wyszukiwanie")
+        st.header("3. Filtracja")
         date_obs = st.date_input("Data obserwacji", pd.Timestamp.now())
         min_alt = st.slider("Min. Wysokość o północy", 10, 80, 25)
 
-        search_query = st.text_input("Szukaj obiektu w bazie:", placeholder="np. M31, Heart Nebula...")
+    return lat, lon, fov_w, fov_h, date_obs, min_alt
 
-    return lat, lon, fov_w, fov_h, date_obs, min_alt, search_query
+def display_dashboard(obs, date_obs, lat, lon):
+    tz = pytz.timezone('Europe/Warsaw')
+    start_of_day = tz.localize(datetime.combine(date_obs, dt_time(0, 0)))
+    time_utc = Time(start_of_day)
 
-def display_dashboard(obs, t_noon, t_midnight, lat, lon):
-    st.title(f"🔭 RedCat Planner: {st.session_state['city']}")
+    s_rise = obs.sun_rise_time(time_utc, which='next').to_datetime(timezone=tz)
+    s_set = obs.sun_set_time(time_utc, which='next').to_datetime(timezone=tz)
 
-    def fmt_time(t_obj):
-        if hasattr(t_obj, 'to_datetime'):
-            dt = t_obj.to_datetime()
-            if dt.tzinfo is None: dt = dt.replace(tzinfo=pytz.utc)
-            return dt.astimezone(pytz.timezone('Europe/Warsaw')).strftime('%H:%M')
-        return "-"
+    astro_dawn = obs.twilight_morning_astronomical(time_utc, which='next').to_datetime(timezone=tz)
+    astro_dusk = obs.twilight_evening_astronomical(time_utc, which='next').to_datetime(timezone=tz)
 
-    s_rise = fmt_time(obs.sun_rise_time(t_noon, which='nearest'))
-    s_set = fmt_time(obs.sun_set_time(t_noon, which='nearest'))
-    dark_start = fmt_time(obs.twilight_evening_astronomical(t_noon, which='nearest'))
-    dark_end = fmt_time(obs.twilight_morning_astronomical(t_noon, which='next'))
+    m_rise = obs.moon_rise_time(time_utc, which='next').to_datetime(timezone=tz)
+    m_set = obs.moon_set_time(time_utc, which='next').to_datetime(timezone=tz)
 
-    try:
-        gh_start = fmt_time(obs.sun_set_time(t_noon, which='nearest', horizon=6*u.deg))
-        gh_end = fmt_time(obs.sun_set_time(t_noon, which='nearest', horizon=-4*u.deg))
-        golden_str = f"{gh_start} - {gh_end}"
-    except: golden_str = "-"
-
+    t_midnight = Time(tz.localize(datetime.combine(date_obs, dt_time(23, 59))))
     moon_illum = obs.moon_illumination(t_midnight) * 100
-    moon_phase = obs.moon_phase(t_midnight)
-    deg = moon_phase.to(u.deg).value
-    m_rise = fmt_time(obs.moon_rise_time(t_midnight, which='next'))
-    m_set = fmt_time(obs.moon_set_time(t_midnight, which='next'))
 
-    if 350 < deg or deg <= 10: p_desc = "Nów"
-    elif 10 < deg <= 80: p_desc = "Sierp (Rosnący)"
-    elif 80 < deg <= 100: p_desc = "I Kwadra"
-    elif 100 < deg <= 170: p_desc = "Garb (Rosnący)"
-    elif 170 < deg <= 190: p_desc = "Pełnia"
-    elif 190 < deg <= 260: p_desc = "Garb (Malejący)"
-    elif 260 < deg <= 280: p_desc = "III Kwadra"
-    else: p_desc = "Sierp (Malejący)"
+    yesterday = t_midnight - timedelta(days=1)
+    illum_yesterday = obs.moon_illumination(yesterday) * 100
+    phase_trend = "Ubywa" if moon_illum < illum_yesterday else "Przybywa"
 
-    with st.spinner("Pobieranie danych o niebie..."):
-        meta = scrape_clear_outside_meta(lat, lon)
+    moon_phase_angle = obs.moon_phase(t_midnight).to(u.deg).value
 
-    st.markdown("### 🌌 Warunki i Pogoda")
+    if 0 <= moon_phase_angle < 10 or 350 < moon_phase_angle <= 360:
+        p_desc = "Nów"
+    elif 170 < moon_phase_angle <= 190:
+        p_desc = "Pełnia"
+    elif 80 < moon_phase_angle <= 100:
+        p_desc = "I Kwadra"
+    elif 260 < moon_phase_angle <= 280:
+        p_desc = "III Kwadra"
+    else:
+        p_desc = f"Księżyc ({phase_trend})"
 
-    c_sqm1, c_sqm2, c_sqm3, c_sqm4,  = st.columns(4)
-    c_sqm1.metric("SQM", meta.get("sqm", "-"))
-    c_sqm2.metric("Bortle", meta.get("bortle", "-"))
-    c_sqm3.metric("Jasność", meta.get("brightness", "-"))
-    c_sqm4.metric("Księżyc", f"{moon_illum:.0f}%")
+    lp_url = f"https://www.lightpollutionmap.info/#zoom=8&lat={lat}&lon={lon}"
+    st.title(f"🔭 RedCat Planner: {st.session_state['city']} [🗺️]({lp_url})")
 
-    c_sun, c_moon = st.columns(2)
-    with c_sun:
-        st.markdown("#### ☀️ Słońce")
-        cc1, cc2 = st.columns(2)
-        cc1.metric("Wschód", s_rise)
-        cc2.metric("Zachód", s_set)
-        st.info(f"📸 Złota Godzina: **{golden_str}**")
-        st.markdown("##### 🌌 Noc Astronomiczna")
-        d1, d2 = st.columns(2)
-        d1.metric("Start", dark_start)
-        d2.metric("Koniec", dark_end)
+    with st.expander("Podsumowanie Nocy", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("#### ☀️ Słońce i Zmierzchy")
+            st.write(f"**Wschód Słońca:** {s_rise.strftime('%H:%M')}")
+            st.write(f"**Zachód Słońca:** {s_set.strftime('%H:%M')}")
+            st.write(f"**Noc astronomiczna:** {astro_dusk.strftime('%H:%M')} - {astro_dawn.strftime('%H:%M')}")
 
-    with c_moon:
-        st.markdown("#### 🌕 Księżyc")
-        mm1, mm2 = st.columns(2)
-        mm1.metric("Wschód", m_rise)
-        mm2.metric("Zachód", m_set)
-        st.success(f"🌑 Faza: **{p_desc}** | Geometria: **{deg:.1f}°**")
+        with c2:
+            st.markdown(f"#### 🌕 Księżyc ({p_desc})")
+            st.write(f"**Wschód Księżyca:** {m_rise.strftime('%H:%M')}")
+            st.write(f"**Zachód Księżyca:** {m_set.strftime('%H:%M')}")
+            st.write(f"**Oświetlenie:** {moon_illum:.2f}%")
+
+        st.markdown("[✨ Prognoza Zorzy Polarnej](https://www.spaceweatherlive.com/en/auroral-activity/aurora-forecast.html)", unsafe_allow_html=True)
 
     st.markdown("#### 🌤️ Prognoza (3 Dni)")
     weather_json = fetch_weather_api(lat, lon)
@@ -133,7 +118,73 @@ def display_dashboard(obs, t_noon, t_midnight, lat, lon):
     else:
         st.warning("Nie udało się pobrać prognozy pogody.")
 
-    st.markdown("---")
+def display_object_details(t, obs, fov_w, fov_h, date_obs, moon_coord, i):
+    row = t['data']
+    coord = t['coord']
+
+    sep = coord.separation(moon_coord).degree
+    warn = "⚠️ BLISKO KSIĘŻYCA!" if sep < 30 else ""
+    moon_icon = "🌑" if sep > 60 else "🌔"
+
+    if row['mag'] < 90:
+        mag_str = f"{row['mag']:.1f}"
+    else:
+        mag_str = "?"
+
+    name_display = f"**{row['id']}**"
+    if row['common_name']:
+        name_display += f" – {row['common_name']}"
+
+    label = f"{'⭐' if t['is_favorite'] else ''} {name_display} | Mag: {mag_str} | Alt: {t['alt']:.0f}° | Kadr: {t['fill']:.0f}%"
+
+    with st.expander(label, expanded=(i == 0)):
+        c1, c2, c3 = st.columns([1, 1, 1])
+
+        with c1:
+            st.markdown("**Symulacja Kadru**")
+            st.pyplot(generate_star_chart(row['ra'], row['dec'], fov_w, fov_h, row['size']))
+
+            st.markdown("**Sezonowość**")
+            st.pyplot(plot_yearly_chart(obs, coord, pytz.timezone('Europe/Warsaw')))
+
+        with c2:
+            st.markdown("**Akcje**")
+
+            if t['is_favorite']:
+                if st.button("💔 Usuń z Ulubionych", key=f"fav_{row['id']}"):
+                    remove_favorite(row['id'])
+                    st.experimental_rerun()
+            else:
+                if st.button("⭐ Dodaj do Ulubionych", key=f"fav_{row['id']}"):
+                    add_favorite(row['id'])
+                    st.experimental_rerun()
+
+            if st.button("🙈 Ukryj na 90 dni", key=f"hide_{row['id']}"):
+                hide_object(row['id'])
+                st.experimental_rerun()
+
+        with c3:
+            st.markdown("**Wykres Nocy (dziś)**")
+            fig_night = plot_night_chart(obs, coord, date_obs, pytz.timezone('Europe/Warsaw'))
+            if fig_night:
+                st.pyplot(fig_night)
+            else:
+                st.warning("Obiekt widoczny zbyt krótko.")
+
+            st.markdown("**Info:**")
+
+            type_map_pl = {'Gx': 'Galaktyka', 'Nb': 'Mgławica', 'Pl': 'Mgławica Planetarna', 'OC': 'Gromada Otwarta', 'Gb': 'Gromada Kulista', 'C+N': 'Gromada + Mgławica', '?': 'Nieznany'}
+            obj_type_pl = type_map_pl.get(row['type'], row['type'])
+            st.write(f"Typ: **{obj_type_pl}**")
+
+            st.write(f"RA: `{coord.ra.to_string(u.hour, sep=':', precision=0)}`")
+            st.write(f"DEC: `{coord.dec.to_string(u.deg, sep=':', precision=0)}`")
+
+            st.write(f"Mag: **{mag_str}**")
+            st.write(f"Kadr: **{t['fill']:.1f}%**")
+            st.write(f"Odl. od Księżyca: **{sep:.0f}°** {moon_icon}")
+
+            if warn: st.error(warn)
 
 def display_targets(obs, t_midnight, fov_w, fov_h, date_obs, min_alt):
     df_targets = load_targets()
@@ -142,6 +193,14 @@ def display_targets(obs, t_midnight, fov_w, fov_h, date_obs, min_alt):
         st.stop()
 
     df_targets = get_visible_objects(df_targets)
+
+    search_query = st.text_input("Filtruj listę obiektów:", placeholder="np. M31, Heart Nebula...")
+
+    if search_query:
+        query = search_query.lower()
+        mask = (df_targets['id'].str.lower().str.contains(query)) | \
+               (df_targets['common_name'].str.lower().str.contains(query))
+        df_targets = df_targets[mask]
 
     valid_targets = []
 
@@ -154,7 +213,7 @@ def display_targets(obs, t_midnight, fov_w, fov_h, date_obs, min_alt):
                 coord = SkyCoord(ra=row['ra'], dec=row['dec'], unit=(u.deg, u.deg))
                 alt_mid = obs.altaz(t_midnight, coord).alt.degree
 
-                if alt_mid < min_alt:
+                if not search_query and alt_mid < min_alt:
                     continue
 
                 obj_area = (row['size'] / 60.0) ** 2
@@ -169,203 +228,26 @@ def display_targets(obs, t_midnight, fov_w, fov_h, date_obs, min_alt):
                     score += 20
 
                 valid_targets.append({
-                    "data": row,
-                    "coord": coord,
-                    "alt": alt_mid,
-                    "fill": fill_pct,
-                    "score": score,
+                    "data": row, "coord": coord, "alt": alt_mid,
+                    "fill": fill_pct, "score": score,
                     "is_favorite": row['id'] in load_preferences()['favorites']
                 })
             except Exception:
                 continue
 
     valid_targets.sort(key=lambda x: (x['is_favorite'], x['score']), reverse=True)
-    top_targets = valid_targets[:15]
 
-    st.subheader(f"Znaleziono {len(valid_targets)} obiektów. Oto Top 15 na dziś:")
+    if not search_query:
+        top_targets = valid_targets[:15]
+        st.subheader(f"Top 15 obiektów na dziś:")
+    else:
+        top_targets = valid_targets
+        st.subheader(f"Znaleziono {len(top_targets)} obiektów:")
 
     moon_coord = get_body("moon", t_midnight, obs.location)
 
-    type_map_pl = {
-        'Gx': 'Galaktyka', 'Nb': 'Mgławica', 'Pl': 'Mgławica Planetarna',
-        'OC': 'Gromada Otwarta', 'Gb': 'Gromada Kulista', 'C+N': 'Gromada + Mgławica', '?': 'Nieznany'
-    }
-
     for i, t in enumerate(top_targets):
-        row = t['data']
-        coord = t['coord']
-
-        sep = coord.separation(moon_coord).degree
-        warn = "⚠️ BLISKO KSIĘŻYCA!" if sep < 30 else ""
-        moon_icon = "🌑" if sep > 60 else "🌔"
-
-        if row['mag'] < 90:
-            mag_str = f"{row['mag']:.1f}"
-        else:
-            mag_str = "?"
-
-        name_display = f"**{row['id']}**"
-        if row['common_name']:
-            name_display += f" – {row['common_name']}"
-
-        label = f"{'⭐' if t['is_favorite'] else ''} {name_display} | Mag: {mag_str} | Alt: {t['alt']:.0f}° | Kadr: {t['fill']:.0f}%"
-
-        with st.expander(label, expanded=(i == 0)):
-            c1, c2, c3 = st.columns([1, 1, 1])
-
-            with c1:
-                st.markdown("**Symulacja Kadru**")
-                st.pyplot(generate_star_chart(row['ra'], row['dec'], fov_w, fov_h, row['size']))
-
-                st.markdown("**Sezonowość**")
-                st.pyplot(plot_yearly_chart(obs, coord, pytz.timezone('Europe/Warsaw')))
-
-            with c2:
-                st.markdown("**Podgląd DSS2**")
-                url_dss = render_skymap_decimal(row['ra'], row['dec'])
-                st.markdown(
-                    f"""
-                    <a href="{url_dss}" target="_blank" style="text-decoration: none;">
-                        <div style="
-                            background-color: #1c83e1;
-                            color: white;
-                            padding: 8px;
-                            border-radius: 5px;
-                            text-align: center;
-                            font-weight: bold;
-                            margin-top: 10px;
-                            margin-bottom: 5px;
-                            border: 1px solid #1668b2a;
-                        ">
-                            🗺️ Pełna Mapa (DSS2)
-                        </div>
-                    </a>
-                    """,
-                    unsafe_allow_html=True
-                )
-                tid = row['id'].lower().strip()
-                tid = tid.replace(".0", "")
-                if re.match(r"^m\d+$", tid):
-                    tid = tid.replace("m", "m-")
-                tid = tid.replace(" ", "-")
-
-                tele_url = f"https://telescopius.com/deep-sky-objects/{tid}"
-
-                st.markdown(
-                    f"""
-                    <a href="{tele_url}" target="_blank" style="text-decoration: none;">
-                        <div style="
-                            background-color: #2eb050;
-                            color: white;
-                            padding: 8px;
-                            border-radius: 5px;
-                            text-align: center;
-                            font-weight: bold;
-                            margin-top: 5px;
-                            border: 1px solid #248f41;
-                        ">
-                            🔭 Zobacz na Telescopius
-                        </div>
-                    </a>
-                    """,
-                    unsafe_allow_html=True
-                )
-            with c3:
-                st.markdown("**Wykres Nocy (dziś)**")
-                fig_night = plot_night_chart(obs, coord, date_obs, pytz.timezone('Europe/Warsaw'))
-                if fig_night:
-                    st.pyplot(fig_night)
-                else:
-                    st.warning("Obiekt widoczny zbyt krótko.")
-
-                st.markdown("---")
-                st.markdown("**Info:**")
-
-                obj_type_pl = type_map_pl.get(row['type'], row['type'])
-                st.write(f"Typ: **{obj_type_pl}**")
-
-                st.write(f"RA: `{coord.ra.to_string(u.hour, sep=':', precision=0)}`")
-                st.write(f"DEC: `{coord.dec.to_string(u.deg, sep=':', precision=0)}`")
-
-                st.write(f"Mag: **{mag_str}**")
-                st.write(f"Kadr: **{t['fill']:.1f}%**")
-                st.write(f"Odl. od Księżyca: **{sep:.0f}°** {moon_icon}")
-
-                if warn: st.error(warn)
-
-                st.markdown("---")
-
-                col_fav, col_hide = st.columns(2)
-
-                with col_fav:
-                    if t['is_favorite']:
-                        if st.button("💔 Usuń z Ulubionych", key=f"fav_{row['id']}"):
-                            remove_favorite(row['id'])
-                            st.experimental_rerun()
-                    else:
-                        if st.button("⭐ Dodaj do Ulubionych", key=f"fav_{row['id']}"):
-                            add_favorite(row['id'])
-                            st.experimental_rerun()
-
-                with col_hide:
-                    if st.button("🙈 Ukryj na 90 dni", key=f"hide_{row['id']}"):
-                        hide_object(row['id'])
-                        st.experimental_rerun()
-
-def display_search_results(query):
-    df_targets = load_targets()
-    if df_targets.empty:
-        return
-
-    query = query.lower()
-    mask = (df_targets['id'].str.lower().str.contains(query)) | \
-           (df_targets['common_name'].str.lower().str.contains(query))
-
-    results = df_targets[mask]
-
-    st.subheader(f"Znaleziono {len(results)} obiektów pasujących do '{query}':")
-
-    if results.empty:
-        st.warning("Brak wyników.")
-        return
-
-    favorites = load_preferences()['favorites']
-
-    for _, row in results.iterrows():
-        is_favorite = row['id'] in favorites
-        label = f"**{row['id']}**"
-        if row['common_name']:
-            label += f" – {row['common_name']}"
-
-        st.markdown(f"--- \n {label}")
-
-        col1, col2 = st.columns([3, 1])
-
-        with col1:
-            st.write(f"Typ: {row['type']} | RA: {row['ra']:.2f} | DEC: {row['dec']:.2f} | Mag: {row['mag']:.1f} | Rozmiar: {row['size']:.1f}'")
-
-        with col2:
-            if not is_favorite:
-                if st.button("⭐ Dodaj do Ulubionych", key=f"search_add_{row['id']}"):
-                    add_favorite(row['id'])
-                    st.experimental_rerun()
-            else:
-                st.success("⭐ Ulubiony")
-def display_external_maps(lat, lon):
-    st.markdown("### 🗺️ Mapy Zewnętrzne")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("#### 💡 Zanieczyszczenie Światłem")
-        lp_url = f"https://lightpollutionmap.app/?lat={lat}&lon={lon}&zoom=7"
-        components.iframe(lp_url, height=400)
-
-    with col2:
-        st.markdown("#### ✨ Prognoza Zorzy Polarnej")
-        aurora_url = f"https://lightpollutionmap.app/?lat={lat}&lon={lon}&zoom=4&layer=aurora"
-        components.iframe(aurora_url, height=400)
-
+        display_object_details(t, obs, fov_w, fov_h, date_obs, moon_coord, i)
 
 def process_weather_data(data, location):
     if not data or "hourly" not in data: return None
