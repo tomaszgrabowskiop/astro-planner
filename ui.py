@@ -8,7 +8,7 @@ import astropy.units as u
 from astropy.coordinates import EarthLocation, SkyCoord, get_body, AltAz
 from astroplan import Observer
 from astropy.time import Time
-from data_fetching import load_targets, scrape_clear_outside_meta, fetch_weather_api
+from data_fetching import load_targets, scrape_lightpollutionmap_data, fetch_weather_api
 from plotting import generate_star_chart, plot_yearly_chart, plot_night_chart, render_skymap_decimal
 from preferences import load_preferences, add_favorite, remove_favorite, hide_object, get_visible_objects
 import streamlit.components.v1 as components
@@ -51,18 +51,26 @@ def setup_sidebar():
 
 def display_dashboard(obs, date_obs, lat, lon):
     tz = pytz.timezone('Europe/Warsaw')
-    start_of_day = tz.localize(datetime.combine(date_obs, dt_time(0, 0)))
-    time_utc = Time(start_of_day)
+    start_of_day_local = tz.localize(datetime.combine(date_obs, dt_time(0, 0)))
+    end_of_day_local = start_of_day_local + timedelta(days=1)
 
-    s_rise = obs.sun_rise_time(time_utc, which='next').to_datetime(timezone=tz)
-    s_set = obs.sun_set_time(time_utc, which='next').to_datetime(timezone=tz)
+    time_utc = Time(start_of_day_local)
+
+    # Sun calculations
+    s_rise_time = obs.sun_rise_time(time_utc, which='next').to_datetime(timezone=tz)
+    s_set_time = obs.sun_set_time(time_utc, which='next').to_datetime(timezone=tz)
 
     astro_dawn = obs.twilight_morning_astronomical(time_utc, which='next').to_datetime(timezone=tz)
     astro_dusk = obs.twilight_evening_astronomical(time_utc, which='next').to_datetime(timezone=tz)
 
-    m_rise = obs.moon_rise_time(time_utc, which='next').to_datetime(timezone=tz)
-    m_set = obs.moon_set_time(time_utc, which='next').to_datetime(timezone=tz)
+    # Moon calculations
+    m_rise_time = obs.moon_rise_time(time_utc, which='next', horizon=0*u.deg)
+    m_set_time = obs.moon_set_time(time_utc, which='next', horizon=0*u.deg)
 
+    m_rise = m_rise_time.to_datetime(timezone=tz) if m_rise_time < Time(end_of_day_local) else None
+    m_set = m_set_time.to_datetime(timezone=tz) if m_set_time < Time(end_of_day_local) else None
+
+    # Moon phase
     t_midnight = Time(tz.localize(datetime.combine(date_obs, dt_time(23, 59))))
     moon_illum = obs.moon_illumination(t_midnight) * 100
 
@@ -83,24 +91,35 @@ def display_dashboard(obs, date_obs, lat, lon):
     else:
         p_desc = f"Księżyc ({phase_trend})"
 
-    lp_url = f"https://www.lightpollutionmap.info/#zoom=8&lat={lat}&lon={lon}"
+    lp_url = f"https://lightpollutionmap.app/pl/#zoom=8&lat={lat}&lon={lon}"
     st.title(f"🔭 RedCat Planner: {st.session_state['city']} [🗺️]({lp_url})")
 
+    with st.spinner("Pobieranie danych o niebie..."):
+        sky_data = scrape_lightpollutionmap_data(lat, lon)
+
     with st.expander("Podsumowanie Nocy", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("SQM", sky_data.get("sqm", "-"))
+        with c2:
+            st.metric("Bortle", sky_data.get("bortle", "-"))
+        with c3:
+            st.metric("Księżyc", f"{moon_illum:.0f}%")
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### ☀️ Słońce i Zmierzchy")
-            st.write(f"**Wschód Słońca:** {s_rise.strftime('%H:%M')}")
-            st.write(f"**Zachód Słońca:** {s_set.strftime('%H:%M')}")
+            st.write(f"**Wschód Słońca:** {s_rise_time.strftime('%H:%M')}")
+            st.write(f"**Zachód Słońca:** {s_set_time.strftime('%H:%M')}")
             st.write(f"**Noc astronomiczna:** {astro_dusk.strftime('%H:%M')} - {astro_dawn.strftime('%H:%M')}")
 
         with c2:
             st.markdown(f"#### 🌕 Księżyc ({p_desc})")
-            st.write(f"**Wschód Księżyca:** {m_rise.strftime('%H:%M')}")
-            st.write(f"**Zachód Księżyca:** {m_set.strftime('%H:%M')}")
-            st.write(f"**Oświetlenie:** {moon_illum:.2f}%")
+            st.write(f"**Wschód Księżyca:** {m_rise.strftime('%H:%M') if m_rise else 'nie wschodzi'}")
+            st.write(f"**Zachód Księżyca:** {m_set.strftime('%H:%M') if m_set else 'nie zachodzi'}")
 
-        st.markdown("[✨ Prognoza Zorzy Polarnej](https://www.spaceweatherlive.com/en/auroral-activity/aurora-forecast.html)", unsafe_allow_html=True)
+    with st.expander("✨ Prognoza Zorzy Polarnej"):
+        components.iframe("https://www.spaceweatherlive.com/en/auroral-activity/auroral-oval.html#ovation-1", height=500, scrolling=True)
 
     st.markdown("#### 🌤️ Prognoza (3 Dni)")
     weather_json = fetch_weather_api(lat, lon)
@@ -148,20 +167,21 @@ def display_object_details(t, obs, fov_w, fov_h, date_obs, moon_coord, i):
             st.pyplot(plot_yearly_chart(obs, coord, pytz.timezone('Europe/Warsaw')))
 
         with c2:
-            st.markdown("**Akcje**")
+            st.markdown("**Podgląd DSS2**")
+            render_skymap_decimal(row['ra'], row['dec'])
 
             if t['is_favorite']:
                 if st.button("💔 Usuń z Ulubionych", key=f"fav_{row['id']}"):
                     remove_favorite(row['id'])
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 if st.button("⭐ Dodaj do Ulubionych", key=f"fav_{row['id']}"):
                     add_favorite(row['id'])
-                    st.experimental_rerun()
+                    st.rerun()
 
             if st.button("🙈 Ukryj na 90 dni", key=f"hide_{row['id']}"):
                 hide_object(row['id'])
-                st.experimental_rerun()
+                st.rerun()
 
         with c3:
             st.markdown("**Wykres Nocy (dziś)**")
